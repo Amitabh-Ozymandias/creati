@@ -1,0 +1,1 @@
+"""VidyaSearch Schemas Package."""
