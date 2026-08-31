@@ -46,12 +46,59 @@ interface AnalyticsData {
   total_indexed_terms: number;
 }
 
+interface CrawlResultData {
+  status?: string;
+  crawl_stats?: {
+    seed_urls?: string[];
+    pages_crawled?: number;
+    documents_indexed?: number;
+    total_links_found?: number;
+    elapsed_seconds?: number;
+    crawl_time_seconds?: number;
+    errors?: string[];
+  };
+  error?: string;
+}
+
+interface SystemStatsData {
+  total_documents: number;
+  total_indexed_terms: number;
+  total_link_edges: number;
+  total_searches: number;
+  cache?: {
+    size: number;
+    max_size: number;
+    hits: number;
+    misses: number;
+    hit_rate_pct?: number;
+  };
+}
+
 export default function SearchEngineApp() {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("q") || "";
+    }
+    return "";
+  });
   const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [ranking, setRanking] = useState<"bm25" | "tfidf">("bm25");
-  const [domainFilter, setDomainFilter] = useState<string>("");
+  const [ranking, setRanking] = useState<"bm25" | "tfidf">(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const r = params.get("ranking");
+      if (r === "bm25" || r === "tfidf") return r;
+    }
+    return "bm25";
+  });
+  const [domainFilter, setDomainFilter] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("domain") || "";
+    }
+    return "";
+  });
   const [activeTab, setActiveTab] = useState<"search" | "crawler" | "analytics" | "stats">("search");
 
   // Autocomplete state
@@ -64,17 +111,91 @@ export default function SearchEngineApp() {
   const [crawlUrl, setCrawlUrl] = useState("https://nptel.ac.in/courses/");
   const [crawlMaxPages, setCrawlMaxPages] = useState(5);
   const [crawling, setCrawling] = useState(false);
-  const [crawlResult, setCrawlResult] = useState<any>(null);
+  const [crawlResult, setCrawlResult] = useState<CrawlResultData | null>(null);
 
   // Analytics & stats state
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
-  const [systemStats, setSystemStats] = useState<any>(null);
+  const [systemStats, setSystemStats] = useState<SystemStatsData | null>(null);
+
+  // Execute Search & Sync URL
+  const handleSearch = async (searchQuery?: string, customDomain?: string, customRanking?: "bm25" | "tfidf") => {
+    const q = searchQuery !== undefined ? searchQuery : query;
+    if (!q.trim()) return;
+
+    setLoading(true);
+    setShowSuggestions(false);
+    setActiveTab("search");
+
+    const targetDomain = customDomain !== undefined ? customDomain : domainFilter;
+    const targetRanking = customRanking !== undefined ? customRanking : ranking;
+
+    let url = `${API_BASE}/search?q=${encodeURIComponent(q)}&ranking=${targetRanking}&per_page=15`;
+    if (targetDomain) {
+      url += `&domain=${encodeURIComponent(targetDomain)}`;
+    }
+
+    // Sync search query with browser address bar
+    if (typeof window !== "undefined") {
+      const searchParams = new URLSearchParams();
+      searchParams.set("q", q);
+      if (targetRanking !== "bm25") searchParams.set("ranking", targetRanking);
+      if (targetDomain) searchParams.set("domain", targetDomain);
+      const newUrl = `${window.location.pathname}?${searchParams.toString()}`;
+      window.history.replaceState(null, "", newUrl);
+    }
+
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const data: SearchResponse = await res.json();
+        setSearchResponse(data);
+      }
+    } catch {
+      // Backend error handling
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Trigger initial search if query was present in URL
+  useEffect(() => {
+    let ignore = false;
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const initialQuery = params.get("q");
+
+      if (initialQuery && initialQuery.trim()) {
+        const initialDomain = params.get("domain") || undefined;
+        const initialRanking = (params.get("ranking") as "bm25" | "tfidf") || "bm25";
+        let url = `${API_BASE}/search?q=${encodeURIComponent(initialQuery)}&ranking=${initialRanking}&per_page=15`;
+        if (initialDomain) {
+          url += `&domain=${encodeURIComponent(initialDomain)}`;
+        }
+
+        fetch(url)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data: SearchResponse | null) => {
+            if (!ignore && data) {
+              setSearchResponse(data);
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (!ignore) {
+              setLoading(false);
+            }
+          });
+      }
+    }
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   // Fetch Autocomplete Suggestions
   useEffect(() => {
     if (!query.trim() || query.length < 2) {
-      setSuggestions([]);
-      setShowSuggestions(false);
       return;
     }
 
@@ -84,9 +205,9 @@ export default function SearchEngineApp() {
         if (res.ok) {
           const data = await res.json();
           setSuggestions(data.suggestions || []);
-          setShowSuggestions(data.suggestions?.length > 0);
+          setShowSuggestions((data.suggestions || []).length > 0);
         }
-      } catch (err) {
+      } catch {
         // Backend might still be starting
       }
     }, 150);
@@ -94,33 +215,30 @@ export default function SearchEngineApp() {
     return () => clearTimeout(timer);
   }, [query]);
 
-  // Execute Search
-  const handleSearch = async (searchQuery?: string, customDomain?: string) => {
-    const q = searchQuery !== undefined ? searchQuery : query;
-    if (!q.trim()) return;
+  // Global keyboard shortcuts (/ to focus, Escape to dismiss)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement;
+      const isInputFocused =
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement ||
+        activeElement?.getAttribute("contenteditable") === "true";
 
-    setLoading(true);
-    setShowSuggestions(false);
-    setActiveTab("search");
-
-    const targetDomain = customDomain !== undefined ? customDomain : domainFilter;
-    let url = `${API_BASE}/search?q=${encodeURIComponent(q)}&ranking=${ranking}&per_page=15`;
-    if (targetDomain) {
-      url += `&domain=${encodeURIComponent(targetDomain)}`;
-    }
-
-    try {
-      const res = await fetch(url);
-      if (res.ok) {
-        const data: SearchResponse = await res.json();
-        setSearchResponse(data);
+      if (e.key === "/" && !isInputFocused) {
+        e.preventDefault();
+        setActiveTab("search");
+        searchInputRef.current?.focus();
+      } else if (e.key === "Escape") {
+        setShowSuggestions(false);
+        if (isInputFocused) {
+          (activeElement as HTMLElement)?.blur();
+        }
       }
-    } catch (err) {
-      console.error("Search failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
 
   // Record Result Click
   const handleResultClick = async (docId: number, position: number, clickedUrl: string) => {
@@ -135,7 +253,7 @@ export default function SearchEngineApp() {
           clicked_url: clickedUrl,
         }),
       });
-    } catch (e) {
+    } catch {
       // Non-critical
     }
   };
@@ -171,20 +289,32 @@ export default function SearchEngineApp() {
   const loadAnalytics = async () => {
     try {
       const res = await fetch(`${API_BASE}/analytics`);
-      if (res.ok) setAnalytics(await res.json());
-    } catch (e) {}
+      if (res.ok) {
+        setAnalytics(await res.json());
+      }
+    } catch {
+      // Non-critical
+    }
   };
 
   const loadStats = async () => {
     try {
       const res = await fetch(`${API_BASE}/stats`);
-      if (res.ok) setSystemStats(await res.json());
-    } catch (e) {}
+      if (res.ok) {
+        setSystemStats(await res.json());
+      }
+    } catch {
+      // Non-critical
+    }
   };
 
+  // Load Tab Data on tab switch
   useEffect(() => {
-    if (activeTab === "analytics") loadAnalytics();
-    if (activeTab === "stats") loadStats();
+    if (activeTab === "analytics") {
+      loadAnalytics();
+    } else if (activeTab === "stats") {
+      loadStats();
+    }
   }, [activeTab]);
 
   // Trigger Live Crawl
@@ -200,7 +330,7 @@ export default function SearchEngineApp() {
         const data = await res.json();
         setCrawlResult(data);
       }
-    } catch (e) {
+    } catch {
       setCrawlResult({ error: "Crawl request failed" });
     } finally {
       setCrawling(false);
@@ -406,7 +536,7 @@ export default function SearchEngineApp() {
                     fontWeight: 500,
                   }}
                 />
-                {query && (
+                {query ? (
                   <button
                     onClick={() => {
                       setQuery("");
@@ -420,9 +550,28 @@ export default function SearchEngineApp() {
                       fontSize: "1.2rem",
                       padding: "0.2rem 0.5rem",
                     }}
+                    aria-label="Clear query"
                   >
                     ✕
                   </button>
+                ) : (
+                  <span
+                    style={{
+                      fontSize: "0.72rem",
+                      color: "var(--text-muted)",
+                      background: "rgba(255, 255, 255, 0.06)",
+                      border: "1px solid rgba(255, 255, 255, 0.1)",
+                      padding: "0.15rem 0.45rem",
+                      borderRadius: "5px",
+                      marginRight: "0.6rem",
+                      userSelect: "none",
+                      fontFamily: "monospace",
+                      fontWeight: 600,
+                    }}
+                    title="Press '/' to focus search"
+                  >
+                    /
+                  </span>
                 )}
                 <button
                   onClick={() => handleSearch()}
@@ -678,7 +827,7 @@ export default function SearchEngineApp() {
                   <div style={{ textAlign: "center", padding: "3rem 1rem", color: "var(--text-muted)" }}>
                     <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>🔍</div>
                     <h3 style={{ color: "var(--text-primary)", marginBottom: "0.5rem" }}>No results found</h3>
-                    <p>Try searching for keywords like "NPTEL", "Machine Learning", "Data Structures", or "Operating Systems".</p>
+                    <p>Try searching for keywords like &quot;NPTEL&quot;, &quot;Machine Learning&quot;, &quot;Data Structures&quot;, or &quot;Operating Systems&quot;.</p>
                   </div>
                 )}
 
