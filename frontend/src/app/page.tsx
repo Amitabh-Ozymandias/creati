@@ -74,32 +74,213 @@ interface SystemStatsData {
   };
 }
 
+interface SearchTab {
+  id: string;
+  title: string;
+  query: string;
+  ranking: "bm25" | "tfidf";
+  domainFilter: string;
+  searchResponse: SearchResponse | null;
+  loading: boolean;
+}
+
 export default function SearchEngineApp() {
-  const [query, setQuery] = useState(() => {
+  // Multi-Tab Search Sessions State
+  const [tabs, setTabs] = useState<SearchTab[]>(() => {
+    let initialQ = "";
+    let initialRanking: "bm25" | "tfidf" = "bm25";
+    let initialDomain = "";
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
-      return params.get("q") || "";
-    }
-    return "";
-  });
-  const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [ranking, setRanking] = useState<"bm25" | "tfidf">(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
+      initialQ = params.get("q") || "";
       const r = params.get("ranking");
-      if (r === "bm25" || r === "tfidf") return r;
+      if (r === "bm25" || r === "tfidf") initialRanking = r;
+      initialDomain = params.get("domain") || "";
     }
-    return "bm25";
+    return [
+      {
+        id: "tab-1",
+        title: initialQ.trim()
+          ? initialQ.length > 20
+            ? initialQ.slice(0, 20) + "…"
+            : initialQ.trim()
+          : "New Search",
+        query: initialQ,
+        ranking: initialRanking,
+        domainFilter: initialDomain,
+        searchResponse: null,
+        loading: false,
+      },
+    ];
   });
-  const [domainFilter, setDomainFilter] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      return params.get("domain") || "";
-    }
-    return "";
-  });
+  const [activeTabId, setActiveTabId] = useState<string>("tab-1");
   const [activeTab, setActiveTab] = useState<"search" | "crawler" | "analytics" | "stats">("search");
+
+  // Active Tab Derived State
+  const activeSearchTab = tabs.find((t) => t.id === activeTabId) || tabs[0] || {
+    id: "tab-fallback",
+    title: "New Search",
+    query: "",
+    ranking: "bm25",
+    domainFilter: "",
+    searchResponse: null,
+    loading: false,
+  };
+
+  const query = activeSearchTab.query;
+  const ranking = activeSearchTab.ranking;
+  const domainFilter = activeSearchTab.domainFilter;
+  const searchResponse = activeSearchTab.searchResponse;
+  const loading = activeSearchTab.loading;
+
+  // Active Tab Mutators
+  const updateActiveTab = (updates: Partial<SearchTab>) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, ...updates } : tab))
+    );
+  };
+
+  const setQuery = (newQuery: string) => {
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === activeTabId
+          ? {
+              ...tab,
+              query: newQuery,
+              title: newQuery.trim()
+                ? newQuery.length > 20
+                  ? newQuery.slice(0, 20) + "…"
+                  : newQuery.trim()
+                : "New Search",
+            }
+          : tab
+      )
+    );
+  };
+
+  const setRanking = (newRanking: "bm25" | "tfidf") => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, ranking: newRanking } : tab))
+    );
+  };
+
+  const setDomainFilter = (newDomain: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, domainFilter: newDomain } : tab))
+    );
+  };
+
+  const setSearchResponse = (data: SearchResponse | null) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, searchResponse: data } : tab))
+    );
+  };
+
+  const setLoading = (isLoading: boolean) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, loading: isLoading } : tab))
+    );
+  };
+
+  // Create New Tab
+  const createNewTab = (initialQuery = "") => {
+    const newId = `tab-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const newTab: SearchTab = {
+      id: newId,
+      title: initialQuery.trim()
+        ? initialQuery.length > 20
+          ? initialQuery.slice(0, 20) + "…"
+          : initialQuery.trim()
+        : "New Search",
+      query: initialQuery,
+      ranking: "bm25",
+      domainFilter: "",
+      searchResponse: null,
+      loading: false,
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newId);
+    setActiveTab("search");
+    setShowSuggestions(false);
+
+    if (typeof window !== "undefined") {
+      const searchParams = new URLSearchParams();
+      if (initialQuery.trim()) searchParams.set("q", initialQuery.trim());
+      const newUrl = initialQuery.trim()
+        ? `${window.location.pathname}?${searchParams.toString()}`
+        : window.location.pathname;
+      window.history.replaceState(null, "", newUrl);
+    }
+
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+      if (initialQuery.trim()) {
+        handleSearch(initialQuery);
+      }
+    }, 60);
+  };
+
+  // Close Tab
+  const closeTab = (tabIdToClose: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+
+    if (tabs.length <= 1) {
+      const freshTab: SearchTab = {
+        id: `tab-${Date.now()}`,
+        title: "New Search",
+        query: "",
+        ranking: "bm25",
+        domainFilter: "",
+        searchResponse: null,
+        loading: false,
+      };
+      setTabs([freshTab]);
+      setActiveTabId(freshTab.id);
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+      return;
+    }
+
+    const tabIndex = tabs.findIndex((t) => t.id === tabIdToClose);
+    const remainingTabs = tabs.filter((t) => t.id !== tabIdToClose);
+    setTabs(remainingTabs);
+
+    if (activeTabId === tabIdToClose) {
+      const nextTab = remainingTabs[Math.max(0, tabIndex - 1)];
+      setActiveTabId(nextTab.id);
+      if (typeof window !== "undefined") {
+        const searchParams = new URLSearchParams();
+        if (nextTab.query.trim()) searchParams.set("q", nextTab.query.trim());
+        if (nextTab.ranking !== "bm25") searchParams.set("ranking", nextTab.ranking);
+        if (nextTab.domainFilter) searchParams.set("domain", nextTab.domainFilter);
+        const newUrl = searchParams.toString()
+          ? `${window.location.pathname}?${searchParams.toString()}`
+          : window.location.pathname;
+        window.history.replaceState(null, "", newUrl);
+      }
+    }
+  };
+
+  // Switch Tab
+  const switchTab = (targetTabId: string) => {
+    const targetTab = tabs.find((t) => t.id === targetTabId);
+    if (!targetTab) return;
+    setActiveTabId(targetTabId);
+    setActiveTab("search");
+    setShowSuggestions(false);
+
+    if (typeof window !== "undefined") {
+      const searchParams = new URLSearchParams();
+      if (targetTab.query.trim()) searchParams.set("q", targetTab.query.trim());
+      if (targetTab.ranking !== "bm25") searchParams.set("ranking", targetTab.ranking);
+      if (targetTab.domainFilter) searchParams.set("domain", targetTab.domainFilter);
+      const newUrl = searchParams.toString()
+        ? `${window.location.pathname}?${searchParams.toString()}`
+        : window.location.pathname;
+      window.history.replaceState(null, "", newUrl);
+    }
+  };
 
   // Autocomplete state
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -122,12 +303,28 @@ export default function SearchEngineApp() {
     const q = searchQuery !== undefined ? searchQuery : query;
     if (!q.trim()) return;
 
-    setLoading(true);
     setShowSuggestions(false);
     setActiveTab("search");
 
     const targetDomain = customDomain !== undefined ? customDomain : domainFilter;
     const targetRanking = customRanking !== undefined ? customRanking : ranking;
+    const currentTabId = activeTabId;
+
+    // Immediately update tab state with query, title, and loading
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === currentTabId
+          ? {
+              ...tab,
+              query: q,
+              title: q.length > 20 ? q.slice(0, 20) + "…" : q,
+              domainFilter: targetDomain,
+              ranking: targetRanking,
+              loading: true,
+            }
+          : tab
+      )
+    );
 
     let url = `${API_BASE}/search?q=${encodeURIComponent(q)}&ranking=${targetRanking}&per_page=15`;
     if (targetDomain) {
@@ -148,12 +345,26 @@ export default function SearchEngineApp() {
       const res = await fetch(url);
       if (res.ok) {
         const data: SearchResponse = await res.json();
-        setSearchResponse(data);
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === currentTabId
+              ? { ...tab, searchResponse: data, loading: false }
+              : tab
+          )
+        );
+      } else {
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === currentTabId ? { ...tab, loading: false } : tab
+          )
+        );
       }
     } catch {
-      // Backend error handling
-    } finally {
-      setLoading(false);
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === currentTabId ? { ...tab, loading: false } : tab
+        )
+      );
     }
   };
 
@@ -176,13 +387,26 @@ export default function SearchEngineApp() {
           .then((res) => (res.ok ? res.json() : null))
           .then((data: SearchResponse | null) => {
             if (!ignore && data) {
-              setSearchResponse(data);
+              setTabs((prev) =>
+                prev.map((tab) =>
+                  tab.id === "tab-1"
+                    ? {
+                        ...tab,
+                        searchResponse: data,
+                        loading: false,
+                        title: initialQuery.length > 20 ? initialQuery.slice(0, 20) + "…" : initialQuery,
+                      }
+                    : tab
+                )
+              );
             }
           })
           .catch(() => {})
           .finally(() => {
             if (!ignore) {
-              setLoading(false);
+              setTabs((prev) =>
+                prev.map((tab) => (tab.id === "tab-1" ? { ...tab, loading: false } : tab))
+              );
             }
           });
       }
@@ -215,7 +439,7 @@ export default function SearchEngineApp() {
     return () => clearTimeout(timer);
   }, [query]);
 
-  // Global keyboard shortcuts (/ to focus, Escape to dismiss)
+  // Global keyboard shortcuts (/ to focus, Escape to dismiss, Ctrl+T, Ctrl+W, Ctrl+1..9)
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       const activeElement = document.activeElement;
@@ -223,6 +447,30 @@ export default function SearchEngineApp() {
         activeElement instanceof HTMLInputElement ||
         activeElement instanceof HTMLTextAreaElement ||
         activeElement?.getAttribute("contenteditable") === "true";
+
+      // Ctrl+T / Cmd+T -> New Search Tab
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        createNewTab();
+        return;
+      }
+
+      // Ctrl+W / Cmd+W -> Close Current Search Tab
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        closeTab(activeTabId);
+        return;
+      }
+
+      // Ctrl+1 through Ctrl+9 -> Switch to Tab
+      if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "9") {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx >= 0 && idx < tabs.length) {
+          e.preventDefault();
+          switchTab(tabs[idx].id);
+          return;
+        }
+      }
 
       if (e.key === "/" && !isInputFocused) {
         e.preventDefault();
@@ -238,7 +486,7 @@ export default function SearchEngineApp() {
 
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, []);
+  }, [tabs, activeTabId]);
 
   // Record Result Click
   const handleResultClick = async (docId: number, position: number, clickedUrl: string) => {
@@ -475,6 +723,55 @@ export default function SearchEngineApp() {
           </button>
         </div>
       </header>
+
+      {/* Multi-Tab Search Sessions Bar */}
+      {activeTab === "search" && (
+        <div className="search-tabs-bar">
+          <div className="search-tabs-scroll">
+            {tabs.map((tab, idx) => {
+              const isActive = tab.id === activeTabId;
+              return (
+                <div
+                  key={tab.id}
+                  className={`search-tab-item ${isActive ? "active" : ""}`}
+                  onClick={() => switchTab(tab.id)}
+                  title={`Tab ${idx + 1}: ${tab.title} (${idx < 9 ? `Ctrl+${idx + 1}` : ""})`}
+                >
+                  <span style={{ fontSize: "0.85rem", opacity: 0.85 }}>
+                    {tab.loading ? "⏳" : "🔍"}
+                  </span>
+                  <span className="search-tab-title">{tab.title}</span>
+                  {tab.searchResponse && (
+                    <span className="search-tab-badge">
+                      {tab.searchResponse.total_results}
+                    </span>
+                  )}
+                  <button
+                    className="search-tab-close"
+                    onClick={(e) => closeTab(tab.id, e)}
+                    title="Close Tab (Ctrl+W)"
+                    aria-label={`Close ${tab.title}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <button
+            className="search-tab-new-btn"
+            onClick={() => createNewTab()}
+            title="Open New Search Tab (Ctrl+T)"
+          >
+            <span style={{ fontSize: "1rem", lineHeight: 1 }}>+</span>
+            <span>New Tab</span>
+            <kbd style={{ fontSize: "0.62rem", padding: "0.1rem 0.35rem", borderRadius: "3px", background: "rgba(255,255,255,0.08)", color: "var(--text-muted)", fontFamily: "monospace" }}>
+              Ctrl+T
+            </kbd>
+          </button>
+        </div>
+      )}
 
       {/* Main Container */}
       <main style={{ flex: 1, padding: "2rem 1.5rem", maxWidth: "1100px", margin: "0 auto", width: "100%" }}>
