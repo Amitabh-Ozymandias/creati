@@ -6,7 +6,7 @@ Represents a crawled web page stored in the database.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Index, Integer, LargeBinary, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -43,6 +43,10 @@ class Document(Base):
     pagerank_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     inlink_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     outlink_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Semantic search — raw float32 byte buffer (numpy-compatible)
+    # Shape: (embedding_dim,) — None if not yet embedded
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

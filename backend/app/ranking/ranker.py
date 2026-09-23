@@ -18,6 +18,8 @@ from app.ranking.tf_idf import TFIDFScorer
 from app.ranking.snippet_generator import SnippetGenerator
 from app.schemas.search import SearchResultItem
 from app.config import settings
+from app.semantic.semantic_encoder import SemanticEncoder
+from app.semantic.embedding_store import EmbeddingStore
 
 
 class Ranker:
@@ -55,7 +57,15 @@ class Ranker:
     ) -> List[SearchResultItem]:
         """
         Execute search and return ranked results with snippets.
+        Supports ranking_method: 'bm25', 'tfidf', or 'semantic'.
         """
+        if ranking_method.lower() == "semantic":
+            return await self.semantic_search(
+                query_str=query_str,
+                domain_filter=domain_filter,
+                limit=limit,
+            )
+
         parsed: ParsedQuery = QueryParser.parse(query_str)
         if not parsed.terms and not parsed.raw_terms:
             return []
@@ -164,3 +174,97 @@ class Ranker:
         # 6. Sort by descending final score
         scored_items.sort(key=lambda item: item.score, reverse=True)
         return scored_items[:limit]
+
+    async def semantic_search(
+        self,
+        query_str: str,
+        domain_filter: str | None = None,
+        limit: int = 50,
+    ) -> List[SearchResultItem]:
+        """
+        Dense-vector semantic search using sentence-transformers embeddings.
+
+        Steps:
+          1. Encode the query to a float32 vector (async thread-pool).
+          2. Cosine-similarity search over the in-memory EmbeddingStore.
+          3. Fetch matching Document rows from DB.
+          4. Apply PageRank authority boost.
+          5. Return ranked SearchResultItems (same format as BM25/TF-IDF).
+        """
+        import asyncio
+
+        store = EmbeddingStore.get_instance()
+
+        if store.is_empty:
+            return []
+
+        # Encode query in thread pool (CPU-bound)
+        encoder = await SemanticEncoder.get_instance(settings.semantic_model)
+        loop = asyncio.get_event_loop()
+        query_vec = await loop.run_in_executor(
+            None, lambda: encoder.encode_query(query_str)
+        )
+
+        # Cosine similarity over in-memory matrix
+        top_k = min(settings.semantic_top_k, store.count)
+        sim_results = store.cosine_search(query_vec, top_k=top_k)
+
+        if not sim_results:
+            return []
+
+        # Build score map: doc_id → cosine similarity
+        candidate_ids = [doc_id for doc_id, _ in sim_results]
+        sim_scores = {doc_id: score for doc_id, score in sim_results}
+
+        # Fetch Documents from DB
+        docs_stmt = select(Document).where(Document.id.in_(candidate_ids))
+        if domain_filter:
+            docs_stmt = docs_stmt.where(Document.domain.ilike(f"%{domain_filter}%"))
+
+        docs_res = await self.session.execute(docs_stmt)
+        documents = {doc.id: doc for doc in docs_res.scalars().all()}
+
+        if not documents:
+            return []
+
+        # Normalise PageRank across candidates for fair blending
+        pr_values = [doc.pagerank_score or 0.0 for doc in documents.values()]
+        max_pr = max(pr_values) if pr_values else 1.0
+        if max_pr == 0.0:
+            max_pr = 1.0
+
+        scored_items: List[SearchResultItem] = []
+        w_pr = settings.semantic_pagerank_weight
+
+        for doc_id, doc in documents.items():
+            cosine_sim = sim_scores.get(doc_id, 0.0)
+            norm_pr = (doc.pagerank_score or 0.0) / max_pr
+
+            # Blend: (1 - w_pr) * semantic_sim + w_pr * pagerank
+            final_score = (1.0 - w_pr) * cosine_sim + w_pr * norm_pr
+
+            # Generate snippet using original query terms for highlighting
+            raw_terms = query_str.split()
+            snippet = SnippetGenerator.generate_snippet(
+                text=doc.body or doc.description,
+                query_terms=raw_terms,
+                snippet_length=settings.search_snippet_length,
+            )
+
+            scored_items.append(
+                SearchResultItem(
+                    doc_id=doc.id,
+                    url=doc.url,
+                    title=doc.title or doc.url,
+                    snippet=snippet,
+                    domain=doc.domain,
+                    score=round(final_score, 4),
+                    pagerank_score=round(doc.pagerank_score or 0.0, 4),
+                    word_count=doc.word_count,
+                    crawled_at=doc.crawled_at,
+                )
+            )
+
+        scored_items.sort(key=lambda item: item.score, reverse=True)
+        return scored_items[:limit]
+

@@ -78,7 +78,7 @@ interface SearchTab {
   id: string;
   title: string;
   query: string;
-  ranking: "bm25" | "tfidf";
+  ranking: "bm25" | "tfidf" | "semantic";
   domainFilter: string;
   searchResponse: SearchResponse | null;
   loading: boolean;
@@ -115,6 +115,15 @@ export default function SearchEngineApp() {
   });
   const [activeTabId, setActiveTabId] = useState<string>("tab-1");
   const [activeTab, setActiveTab] = useState<"search" | "crawler" | "analytics" | "stats">("search");
+
+  // Semantic Index Build State
+  const [buildingEmbeds, setBuildingEmbeds] = useState(false);
+  const [embedBuildResult, setEmbedBuildResult] = useState<{
+    status?: string;
+    embedded_count?: number;
+    total_docs?: number;
+    error?: string;
+  } | null>(null);
 
   // Active Tab Derived State
   const activeSearchTab = tabs.find((t) => t.id === activeTabId) || tabs[0] || {
@@ -158,7 +167,7 @@ export default function SearchEngineApp() {
     );
   };
 
-  const setRanking = (newRanking: "bm25" | "tfidf") => {
+  const setRanking = (newRanking: "bm25" | "tfidf" | "semantic") => {
     setTabs((prev) =>
       prev.map((tab) => (tab.id === activeTabId ? { ...tab, ranking: newRanking } : tab))
     );
@@ -987,6 +996,7 @@ export default function SearchEngineApp() {
                     setRanking("bm25");
                     if (hasSearched) handleSearch();
                   }}
+                  title="Okapi BM25 + PageRank — classic keyword relevance scoring"
                   style={{
                     padding: "0.3rem 0.65rem",
                     borderRadius: "6px",
@@ -996,6 +1006,7 @@ export default function SearchEngineApp() {
                     fontWeight: 600,
                     cursor: "pointer",
                     fontSize: "0.78rem",
+                    transition: "all 0.2s",
                   }}
                 >
                   BM25 + PageRank
@@ -1005,6 +1016,7 @@ export default function SearchEngineApp() {
                     setRanking("tfidf");
                     if (hasSearched) handleSearch();
                   }}
+                  title="TF-IDF — term frequency / inverse document frequency scoring"
                   style={{
                     padding: "0.3rem 0.65rem",
                     borderRadius: "6px",
@@ -1014,9 +1026,37 @@ export default function SearchEngineApp() {
                     fontWeight: 600,
                     cursor: "pointer",
                     fontSize: "0.78rem",
+                    transition: "all 0.2s",
                   }}
                 >
                   TF-IDF
+                </button>
+                <button
+                  onClick={() => {
+                    setRanking("semantic");
+                    if (hasSearched) handleSearch();
+                  }}
+                  title="Semantic Search — dense vector similarity via sentence-transformers (all-MiniLM-L6-v2). Finds by meaning, not just keywords."
+                  style={{
+                    padding: "0.3rem 0.65rem",
+                    borderRadius: "6px",
+                    border: ranking === "semantic"
+                      ? "1px solid #a78bfa"
+                      : "1px solid var(--border-color)",
+                    background: ranking === "semantic"
+                      ? "linear-gradient(135deg, rgba(139,92,246,0.35) 0%, rgba(99,102,241,0.25) 100%)"
+                      : "transparent",
+                    color: ranking === "semantic" ? "#e9d5ff" : "var(--text-muted)",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontSize: "0.78rem",
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                  }}
+                >
+                  🧠 Semantic
                 </button>
               </div>
             </div>
@@ -1279,6 +1319,102 @@ export default function SearchEngineApp() {
               >
                 {crawling ? "Crawling in Progress (Async Fetcher & Indexer)..." : "Start Live Crawl"}
               </button>
+
+              {/* Semantic Index Build */}
+              <div style={{ marginTop: "1.25rem", paddingTop: "1.25rem", borderTop: "1px solid var(--border-color)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: "0.95rem" }}>🧠 Semantic Index</div>
+                    <div style={{ color: "var(--text-muted)", fontSize: "0.8rem", marginTop: "0.15rem" }}
+                    >Generate sentence-transformer embeddings for all documents</div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "0.75rem" }}>
+                  <button
+                    id="btn-build-embeddings"
+                    onClick={async () => {
+                      setBuildingEmbeds(true);
+                      setEmbedBuildResult(null);
+                      try {
+                        const res = await fetch(`${API_BASE}/embeddings/build`, { method: "POST" });
+                        const data = await res.json();
+                        setEmbedBuildResult(data);
+                      } catch {
+                        setEmbedBuildResult({ error: "Failed to reach backend" });
+                      } finally {
+                        setBuildingEmbeds(false);
+                      }
+                    }}
+                    disabled={buildingEmbeds}
+                    style={{
+                      flex: 1,
+                      padding: "0.7rem",
+                      borderRadius: "8px",
+                      background: buildingEmbeds
+                        ? "rgba(139,92,246,0.2)"
+                        : "linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)",
+                      color: "#fff",
+                      fontWeight: 700,
+                      fontSize: "0.9rem",
+                      border: "1px solid rgba(139,92,246,0.4)",
+                      cursor: buildingEmbeds ? "not-allowed" : "pointer",
+                      transition: "all 0.2s",
+                    }}
+                  >
+                    {buildingEmbeds ? "⏳ Building Embeddings..." : "Build Semantic Index (New Docs)"}
+                  </button>
+                  <button
+                    id="btn-rebuild-embeddings"
+                    onClick={async () => {
+                      setBuildingEmbeds(true);
+                      setEmbedBuildResult(null);
+                      try {
+                        const res = await fetch(`${API_BASE}/embeddings/build?force=true`, { method: "POST" });
+                        const data = await res.json();
+                        setEmbedBuildResult(data);
+                      } catch {
+                        setEmbedBuildResult({ error: "Failed to reach backend" });
+                      } finally {
+                        setBuildingEmbeds(false);
+                      }
+                    }}
+                    disabled={buildingEmbeds}
+                    title="Re-embed ALL documents (use after model upgrade)"
+                    style={{
+                      padding: "0.7rem 1rem",
+                      borderRadius: "8px",
+                      background: "transparent",
+                      color: "#a78bfa",
+                      fontWeight: 600,
+                      fontSize: "0.85rem",
+                      border: "1px solid rgba(139,92,246,0.35)",
+                      cursor: buildingEmbeds ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    ↺ Force Rebuild
+                  </button>
+                </div>
+                {embedBuildResult && (
+                  <div style={{
+                    marginTop: "0.75rem",
+                    padding: "0.75rem 1rem",
+                    borderRadius: "8px",
+                    background: embedBuildResult.error
+                      ? "rgba(239,68,68,0.1)"
+                      : "rgba(139,92,246,0.12)",
+                    border: embedBuildResult.error
+                      ? "1px solid rgba(239,68,68,0.3)"
+                      : "1px solid rgba(139,92,246,0.3)",
+                    fontSize: "0.85rem",
+                    color: embedBuildResult.error ? "#fca5a5" : "#e9d5ff",
+                  }}>
+                    {embedBuildResult.error
+                      ? `❌ Error: ${embedBuildResult.error}`
+                      : `✓ Embedded ${embedBuildResult.embedded_count} new document(s) — ${embedBuildResult.total_docs} total in semantic index`
+                    }
+                  </div>
+                )}
+              </div>
             </div>
 
             {crawlResult && (
@@ -1397,7 +1533,7 @@ export default function SearchEngineApp() {
 
       {/* Footer */}
       <footer style={{ borderTop: "1px solid var(--border-color)", padding: "1.5rem", textAlign: "center", fontSize: "0.85rem", color: "var(--text-muted)" }}>
-        VidyaSearch • Information Retrieval System for Indian Higher Education • BM25 + PageRank + Prefix Trie
+        VidyaSearch • Information Retrieval System for Indian Higher Education • BM25 + TF-IDF + Semantic (all-MiniLM-L6-v2) + PageRank + Prefix Trie
       </footer>
     </div>
   );

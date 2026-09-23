@@ -1,9 +1,12 @@
 """
 VidyaSearch — Central API Router
 
-Defines all search, autocomplete, crawling, PageRank, and analytics endpoints.
+Defines all search, autocomplete, crawling, PageRank, analytics, and
+semantic-search endpoints.
 """
 
+import asyncio
+import logging
 import time
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
@@ -30,6 +33,11 @@ from app.schemas.search import (
 )
 from app.schemas.analytics import AnalyticsSummary, ClickEvent
 from app.seed.seeder import seed_database
+from app.semantic.semantic_encoder import SemanticEncoder
+from app.semantic.embedding_store import EmbeddingStore
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -49,7 +57,7 @@ async def search_endpoint(
     q: str = Query(..., min_length=1, max_length=512, description="Search query string"),
     page: int = Query(1, ge=1, le=100, description="Page number"),
     per_page: int = Query(10, ge=1, le=50, description="Results per page"),
-    ranking: str = Query("bm25", pattern="^(bm25|tfidf)$", description="Ranking algorithm (bm25 or tfidf)"),
+    ranking: str = Query("bm25", pattern="^(bm25|tfidf|semantic)$", description="Ranking algorithm (bm25, tfidf, or semantic)"),
     domain: Optional[str] = Query(None, description="Domain filter (e.g. nptel.ac.in)"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -170,10 +178,12 @@ async def trigger_crawl_endpoint(
     # Refresh autocomplete & spellcheck
     await SuggestionEngine.build_from_db(db)
     await SpellChecker.build_vocabulary(db)
+    # Rebuild semantic embeddings for newly crawled documents
+    embed_stats = await _build_embeddings(db)
     # Invalidate cache
     QueryCache.get_instance().invalidate_all()
 
-    return {"status": "success", "crawl_stats": result}
+    return {"status": "success", "crawl_stats": result, "embed_stats": embed_stats}
 
 
 @router.post("/pagerank/recompute")
@@ -217,7 +227,92 @@ async def seed_data_endpoint(
 ):
     """Seed the database with sample Indian college resources."""
     result = await seed_database(db, force=force)
-    return result
+    # Build embeddings for freshly seeded documents
+    embed_stats = await _build_embeddings(db)
+    return {**result, "embed_stats": embed_stats}
+
+
+# ---------------------------------------------------------------------------
+# Embeddings helpers & endpoint
+# ---------------------------------------------------------------------------
+
+async def _build_embeddings(session: AsyncSession) -> dict:
+    """
+    Internal helper: generate sentence-transformer embeddings for all
+    documents that do not yet have one, persist to DB, and reload the
+    in-memory EmbeddingStore.
+
+    Returns a stats dict: {embedded_count, skipped_count, total_docs}.
+    """
+    # Fetch docs without embeddings
+    stmt = select(Document).where(Document.embedding.is_(None))
+    result = await session.execute(stmt)
+    docs_to_embed = result.scalars().all()
+
+    if not docs_to_embed:
+        # Nothing new — just reload the store in case it's empty
+        store = EmbeddingStore.get_instance()
+        if store.is_empty:
+            await store.load_from_db(session)
+        return {"embedded_count": 0, "skipped_count": 0, "total_docs": store.count}
+
+    encoder = await SemanticEncoder.get_instance(settings.semantic_model)
+    store = EmbeddingStore.get_instance()
+
+    texts = [
+        f"{doc.title} {doc.description} {doc.body[:2000]}" for doc in docs_to_embed
+    ]
+
+    # Encode in a thread pool (CPU-bound)
+    loop = asyncio.get_event_loop()
+    embeddings = await loop.run_in_executor(
+        None, lambda: encoder.encode(texts)
+    )
+
+    embedded_count = 0
+    for doc, vec in zip(docs_to_embed, embeddings):
+        blob = vec.tobytes()
+        doc.embedding = blob
+        store.upsert(doc.id, vec)
+        embedded_count += 1
+
+    await session.commit()
+    logger.info("[EmbeddingBuilder] Embedded %d documents.", embedded_count)
+
+    return {
+        "embedded_count": embedded_count,
+        "skipped_count": 0,
+        "total_docs": store.count,
+    }
+
+
+@router.post("/embeddings/build")
+async def build_embeddings_endpoint(
+    force: bool = Query(False, description="Re-embed all docs, even if already embedded"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate (or regenerate) sentence-transformer embeddings for all
+    documents and reload the in-memory semantic index.
+
+    - `force=false` (default): Only embeds documents that have no embedding yet.
+    - `force=true`: Re-embeds *all* documents (useful after a model upgrade).
+    """
+    if force:
+        # Clear existing embeddings so _build_embeddings picks them all up
+        result = await db.execute(select(Document))
+        all_docs = result.scalars().all()
+        for doc in all_docs:
+            doc.embedding = None
+        await db.commit()
+        # Reset in-memory store
+        store = EmbeddingStore.get_instance()
+        store._matrix = __import__("numpy").empty((0, 0), dtype="float32")
+        store._doc_ids = []
+        store._id_to_row = {}
+
+    stats = await _build_embeddings(db)
+    return {"status": "success", **stats}
 
 
 @router.get("/stats")

@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     cache_max_size: int = 1000
     cache_ttl_seconds: int = 3600  # 1 hour
 
+    # Semantic Search
+    semantic_model: str = "all-MiniLM-L6-v2"
+    # Weight of PageRank in combined semantic + PageRank score
+    semantic_pagerank_weight: float = 0.3
+    # Candidate pool size retrieved via cosine sim before PageRank re-rank
+    semantic_top_k: int = 100
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000

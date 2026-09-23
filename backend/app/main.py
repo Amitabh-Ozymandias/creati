@@ -28,6 +28,13 @@ async def lifespan(app: FastAPI):
         await seed_database(session)
         print("[VidyaSearch] Sample resources verified / seeded")
 
+    # Warm up the semantic embedding store (load existing vectors into memory)
+    async with async_session() as session:
+        from app.semantic.embedding_store import EmbeddingStore
+        store = EmbeddingStore.get_instance()
+        n = await store.load_from_db(session)
+        print(f"[VidyaSearch] Semantic embedding store loaded ({n} vectors)")
+
     yield
     # Shutdown
     print("[VidyaSearch] Shutting down...")
