@@ -15,7 +15,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=512, description="Search query string")
     page: int = Field(1, ge=1, le=100, description="Page number")
     per_page: int = Field(10, ge=1, le=50, description="Results per page")
-    ranking: str = Field("bm25", pattern="^(bm25|tfidf)$", description="Ranking algorithm")
+    ranking: str = Field("bm25", pattern="^(bm25|tfidf|semantic|hybrid)$", description="Ranking algorithm")
     domain: str | None = Field(None, description="Filter by domain")
 
 

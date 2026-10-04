@@ -57,7 +57,7 @@ async def search_endpoint(
     q: str = Query(..., min_length=1, max_length=512, description="Search query string"),
     page: int = Query(1, ge=1, le=100, description="Page number"),
     per_page: int = Query(10, ge=1, le=50, description="Results per page"),
-    ranking: str = Query("bm25", pattern="^(bm25|tfidf|semantic)$", description="Ranking algorithm (bm25, tfidf, or semantic)"),
+    ranking: str = Query("bm25", pattern="^(bm25|tfidf|semantic|hybrid)$", description="Ranking algorithm (bm25, tfidf, semantic, or hybrid)"),
     domain: Optional[str] = Query(None, description="Domain filter (e.g. nptel.ac.in)"),
     db: AsyncSession = Depends(get_db),
 ):

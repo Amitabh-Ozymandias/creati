@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # Candidate pool size retrieved via cosine sim before PageRank re-rank
     semantic_top_k: int = 100
 
+    # Hybrid Search (BM25 + semantic, Reciprocal Rank Fusion)
+    # RRF damping constant — 60 is the standard value from the original paper
+    hybrid_rrf_k: int = 60
+    # Candidates taken from each retriever before fusion
+    hybrid_candidates: int = 100
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000

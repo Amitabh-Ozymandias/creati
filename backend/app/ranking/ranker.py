@@ -2,7 +2,9 @@
 VidyaSearch — Unified Search Ranker
 
 Orchestrates retrieval from the Inverted Index and scores candidates
-using BM25 or TF-IDF combined with PageRank and positional signals.
+using BM25 or TF-IDF combined with PageRank and positional signals,
+dense semantic similarity, or a hybrid of BM25 + semantic fused with
+Reciprocal Rank Fusion (RRF).
 """
 
 from collections import defaultdict
@@ -57,8 +59,15 @@ class Ranker:
     ) -> List[SearchResultItem]:
         """
         Execute search and return ranked results with snippets.
-        Supports ranking_method: 'bm25', 'tfidf', or 'semantic'.
+        Supports ranking_method: 'bm25', 'tfidf', 'semantic', or 'hybrid'.
         """
+        if ranking_method.lower() == "hybrid":
+            return await self.hybrid_search(
+                query_str=query_str,
+                domain_filter=domain_filter,
+                limit=limit,
+            )
+
         if ranking_method.lower() == "semantic":
             return await self.semantic_search(
                 query_str=query_str,
@@ -268,3 +277,50 @@ class Ranker:
         scored_items.sort(key=lambda item: item.score, reverse=True)
         return scored_items[:limit]
 
+    async def hybrid_search(
+        self,
+        query_str: str,
+        domain_filter: str | None = None,
+        limit: int = 50,
+    ) -> List[SearchResultItem]:
+        """
+        Hybrid search: BM25 (exact keywords, course codes, names) fused with
+        semantic search (meaning) via Reciprocal Rank Fusion.
+
+            RRF(d) = sum over lists of 1 / (k + rank(d))
+
+        RRF uses only ranks, so the incomparable BM25 and cosine score scales
+        never need to be normalised against each other. Scores are scaled to
+        0-1 by dividing by the best possible value (rank 1 in both lists).
+        If no embeddings exist yet, this degrades gracefully to BM25 ranking.
+        """
+        pool = settings.hybrid_candidates
+        k = settings.hybrid_rrf_k
+
+        # site: operators are parsed out by the BM25 path; honour them for the
+        # semantic side too so both lists cover the same domain.
+        semantic_domain = domain_filter or QueryParser.parse(query_str).site_filter
+
+        keyword_results = await self.search(
+            query_str, ranking_method="bm25", domain_filter=domain_filter, limit=pool
+        )
+        semantic_results = await self.semantic_search(
+            query_str, domain_filter=semantic_domain, limit=pool
+        )
+
+        fused: Dict[int, float] = defaultdict(float)
+        items: Dict[int, SearchResultItem] = {}
+        # Keyword list goes last so its snippet (highlighting real term
+        # matches) wins for documents found by both retrievers.
+        for results in (semantic_results, keyword_results):
+            for rank, item in enumerate(results, start=1):
+                fused[item.doc_id] += 1.0 / (k + rank)
+                items[item.doc_id] = item
+
+        max_possible = 2.0 / (k + 1)
+        hybrid_items = [
+            items[doc_id].model_copy(update={"score": round(score / max_possible, 4)})
+            for doc_id, score in fused.items()
+        ]
+        hybrid_items.sort(key=lambda item: item.score, reverse=True)
+        return hybrid_items[:limit]

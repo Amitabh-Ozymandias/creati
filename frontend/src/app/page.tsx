@@ -74,11 +74,14 @@ interface SystemStatsData {
   };
 }
 
+type RankingMethod = "bm25" | "tfidf" | "semantic" | "hybrid";
+const RANKING_METHODS: RankingMethod[] = ["bm25", "tfidf", "semantic", "hybrid"];
+
 interface SearchTab {
   id: string;
   title: string;
   query: string;
-  ranking: "bm25" | "tfidf" | "semantic";
+  ranking: RankingMethod;
   domainFilter: string;
   searchResponse: SearchResponse | null;
   loading: boolean;
@@ -88,13 +91,13 @@ export default function SearchEngineApp() {
   // Multi-Tab Search Sessions State
   const [tabs, setTabs] = useState<SearchTab[]>(() => {
     let initialQ = "";
-    let initialRanking: "bm25" | "tfidf" = "bm25";
+    let initialRanking: RankingMethod = "bm25";
     let initialDomain = "";
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       initialQ = params.get("q") || "";
       const r = params.get("ranking");
-      if (r === "bm25" || r === "tfidf") initialRanking = r;
+      if (RANKING_METHODS.includes(r as RankingMethod)) initialRanking = r as RankingMethod;
       initialDomain = params.get("domain") || "";
     }
     return [
@@ -167,7 +170,7 @@ export default function SearchEngineApp() {
     );
   };
 
-  const setRanking = (newRanking: "bm25" | "tfidf" | "semantic") => {
+  const setRanking = (newRanking: RankingMethod) => {
     setTabs((prev) =>
       prev.map((tab) => (tab.id === activeTabId ? { ...tab, ranking: newRanking } : tab))
     );
@@ -308,7 +311,7 @@ export default function SearchEngineApp() {
   const [systemStats, setSystemStats] = useState<SystemStatsData | null>(null);
 
   // Execute Search & Sync URL
-  const handleSearch = async (searchQuery?: string, customDomain?: string, customRanking?: "bm25" | "tfidf") => {
+  const handleSearch = async (searchQuery?: string, customDomain?: string, customRanking?: RankingMethod) => {
     const q = searchQuery !== undefined ? searchQuery : query;
     if (!q.trim()) return;
 
@@ -386,7 +389,8 @@ export default function SearchEngineApp() {
 
       if (initialQuery && initialQuery.trim()) {
         const initialDomain = params.get("domain") || undefined;
-        const initialRanking = (params.get("ranking") as "bm25" | "tfidf") || "bm25";
+        const rankingParam = params.get("ranking") as RankingMethod;
+        const initialRanking: RankingMethod = RANKING_METHODS.includes(rankingParam) ? rankingParam : "bm25";
         let url = `${API_BASE}/search?q=${encodeURIComponent(initialQuery)}&ranking=${initialRanking}&per_page=15`;
         if (initialDomain) {
           url += `&domain=${encodeURIComponent(initialDomain)}`;
@@ -994,7 +998,7 @@ export default function SearchEngineApp() {
                 <button
                   onClick={() => {
                     setRanking("bm25");
-                    if (hasSearched) handleSearch();
+                    if (hasSearched) handleSearch(undefined, undefined, "bm25");
                   }}
                   title="Okapi BM25 + PageRank — classic keyword relevance scoring"
                   style={{
@@ -1014,7 +1018,7 @@ export default function SearchEngineApp() {
                 <button
                   onClick={() => {
                     setRanking("tfidf");
-                    if (hasSearched) handleSearch();
+                    if (hasSearched) handleSearch(undefined, undefined, "tfidf");
                   }}
                   title="TF-IDF — term frequency / inverse document frequency scoring"
                   style={{
@@ -1034,7 +1038,7 @@ export default function SearchEngineApp() {
                 <button
                   onClick={() => {
                     setRanking("semantic");
-                    if (hasSearched) handleSearch();
+                    if (hasSearched) handleSearch(undefined, undefined, "semantic");
                   }}
                   title="Semantic Search — dense vector similarity via sentence-transformers (all-MiniLM-L6-v2). Finds by meaning, not just keywords."
                   style={{
@@ -1057,6 +1061,33 @@ export default function SearchEngineApp() {
                   }}
                 >
                   🧠 Semantic
+                </button>
+                <button
+                  onClick={() => {
+                    setRanking("hybrid");
+                    if (hasSearched) handleSearch(undefined, undefined, "hybrid");
+                  }}
+                  title="Hybrid Search — BM25 keyword matching fused with semantic similarity via Reciprocal Rank Fusion. Catches exact terms (course codes, college names) and meaning."
+                  style={{
+                    padding: "0.3rem 0.65rem",
+                    borderRadius: "6px",
+                    border: ranking === "hybrid"
+                      ? "1px solid #2dd4bf"
+                      : "1px solid var(--border-color)",
+                    background: ranking === "hybrid"
+                      ? "linear-gradient(135deg, rgba(45,212,191,0.3) 0%, rgba(139,92,246,0.25) 100%)"
+                      : "transparent",
+                    color: ranking === "hybrid" ? "#ccfbf1" : "var(--text-muted)",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontSize: "0.78rem",
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                  }}
+                >
+                  ⚡ Hybrid
                 </button>
               </div>
             </div>

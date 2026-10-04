@@ -216,6 +216,82 @@ class TestSemanticSearchIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(r.score, float)
             self.assertGreaterEqual(r.score, 0.0)
 
+    async def _embed_seeded_docs(self, dim: int = 384) -> np.ndarray:
+        """Give every seeded doc a random embedding and install a mock encoder."""
+        from app.models.document import Document
+        from app.semantic import semantic_encoder as enc_module
+        from sqlalchemy import select
+
+        store = EmbeddingStore.get_instance()
+        async with self.session_factory() as session:
+            docs = (await session.execute(select(Document))).scalars().all()
+            for doc in docs:
+                vec = np.random.randn(dim).astype(np.float32)
+                vec /= np.linalg.norm(vec)
+                doc.embedding = vec.tobytes()
+                store.upsert(doc.id, vec)
+            await session.commit()
+
+        query_vec = np.random.randn(dim).astype(np.float32)
+        query_vec /= np.linalg.norm(query_vec)
+        mock_encoder = MagicMock()
+        mock_encoder.encode_query.return_value = query_vec
+        enc_module.SemanticEncoder._instance = mock_encoder
+        return query_vec
+
+    async def test_hybrid_falls_back_to_bm25_without_embeddings(self):
+        """With an empty EmbeddingStore, hybrid ranks exactly like BM25."""
+        async with self.session_factory() as session:
+            ranker = Ranker(session=session)
+            bm25 = await ranker.search("machine learning", ranking_method="bm25")
+            hybrid = await ranker.search("machine learning", ranking_method="hybrid")
+
+        self.assertGreater(len(hybrid), 0)
+        self.assertEqual([r.doc_id for r in hybrid], [r.doc_id for r in bm25])
+
+    async def test_hybrid_fuses_keyword_and_semantic_results(self):
+        """Hybrid returns the union of both lists, scored 0-1 and sorted."""
+        await self._embed_seeded_docs()
+
+        async with self.session_factory() as session:
+            ranker = Ranker(session=session)
+            bm25 = await ranker.search("machine learning", ranking_method="bm25", limit=100)
+            semantic = await ranker.semantic_search("machine learning", limit=100)
+            hybrid = await ranker.search("machine learning", ranking_method="hybrid", limit=100)
+
+        expected_ids = {r.doc_id for r in bm25} | {r.doc_id for r in semantic}
+        self.assertEqual({r.doc_id for r in hybrid}, expected_ids)
+
+        scores = [r.score for r in hybrid]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        for s in scores:
+            self.assertGreater(s, 0.0)
+            self.assertLessEqual(s, 1.0)
+
+    async def test_hybrid_ranks_docs_found_by_both_retrievers_higher(self):
+        """A doc ranked #1 by both BM25 and semantic gets the maximum score of 1.0."""
+        from unittest.mock import patch
+        from app.config import settings
+        from app.semantic import semantic_encoder as enc_module
+
+        await self._embed_seeded_docs()
+
+        # Pure cosine ranking, so the exact-match vector is guaranteed rank 1
+        with patch.object(settings, "semantic_pagerank_weight", 0.0):
+            async with self.session_factory() as session:
+                ranker = Ranker(session=session)
+                bm25 = await ranker.search("machine learning", ranking_method="bm25")
+                top_doc = bm25[0].doc_id
+
+                # Make the query vector identical to the BM25 winner's embedding
+                store = EmbeddingStore.get_instance()
+                winner_vec = store._matrix[store._id_to_row[top_doc]]
+                enc_module.SemanticEncoder._instance.encode_query.return_value = winner_vec
+
+                hybrid = await ranker.search("machine learning", ranking_method="hybrid")
+
+        self.assertEqual(hybrid[0].doc_id, top_doc)
+        self.assertEqual(hybrid[0].score, 1.0)
 
 if __name__ == "__main__":
     unittest.main()
